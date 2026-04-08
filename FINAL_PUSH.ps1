@@ -80,13 +80,14 @@ try {
     Write-Host "🔗 Share with others:" -ForegroundColor Cyan
     Write-Host "   git clone https://github.com/rohitkatore/edustay.git"
     Write-Host ""
-} catch {
+}
+catch {
     Write-Host ""
     Write-Host "❌ Push failed. Common reasons:" -ForegroundColor Red
     Write-Host "   1. Repository doesn't exist on GitHub (create at https://github.com/new)"
     Write-Host "   2. Not authenticated (set up GitHub CLI, PAT, or SSH)"
     Write-Host "   3. No internet connection"
     Write-Host ""
-    Write-Host "📖 See FINAL_PUSH_STEPS.md for detailed troubleshooting." -ForegroundColor Yellow
+    Write-Host "See FINAL_PUSH_STEPS.md for detailed troubleshooting." -ForegroundColor Yellow
     exit 1
 }
