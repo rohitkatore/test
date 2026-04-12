@@ -1,13 +1,21 @@
-﻿// components/chat/Chatbot.tsx
+// components/chat/Chatbot.tsx
 "use client";
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Intent = "accommodation" | "food" | "both";
-type Step = "role" | "service" | "location" | "results" | "owner";
+
+/**
+ * init            — greeting shown; user selects Student or Traveller
+ * student-service — logged-in STUDENT with university; selects service type (auto-search)
+ * service         — Traveller selects service type
+ * location        — Traveller (or student follow-up) types a location
+ */
+type Step = "init" | "student-service" | "service" | "location";
 
 type BotButton = {
   label: string;
@@ -31,142 +39,124 @@ const BTN: Record<string, string> = {
   gray:   "bg-gray-100 hover:bg-gray-200 text-gray-800 border border-gray-300",
 };
 
-// ─── Initial greeting message ─────────────────────────────────────────────────
+// ─── University value → display label map ────────────────────────────────────
+// Keys match what the registration form stores in User.university
 
-const greeting = (): ChatMessage => ({
-  sender: "bot",
-  text: "👋 Hi! I am EduBot, your student accommodation assistant.\n\nI help you find PGs, hostels, flats, and food services near your university or city.\n\nWho are you?",
-  buttons: [
-    { label: "🎓  I am a Student",        action: "role:student", color: "blue"  },
-    { label: "🏠  I am a Property Owner", action: "role:owner",   color: "green" },
-  ],
-});
+const UNIVERSITY_MAP: Record<string, string> = {
+  iit_bombay:          "IIT Bombay",
+  iit_delhi:           "IIT Delhi",
+  bits_pilani:         "BITS Pilani",
+  nit_trichy:          "NIT Trichy",
+  aiims_delhi:         "AIIMS Delhi",
+  pgimer_chandigarh:   "PGIMER Chandigarh",
+  jipmer_puducherry:   "JIPMER Puducherry",
+  kmc_manipal:         "KMC Manipal",
+};
+
+/** Convert the stored DB value (e.g. "iit_bombay") to a search-friendly label.
+ *  If it is already a plain name (from profile edit), it is returned as-is. */
+function getUniversityLabel(raw: string): string {
+  if (!raw) return "";
+  const key = raw.toLowerCase().replace(/\s+/g, "_");
+  return UNIVERSITY_MAP[key] ?? raw;
+}
+
+// ─── Greeting builder (session-aware) ────────────────────────────────────────
+
+function buildGreeting(session: any): { message: ChatMessage; initialStep: Step } {
+  const userType    = (session?.user as any)?.userType  as string | undefined;
+  const uniRaw      = (session?.user as any)?.university as string | undefined;
+  const firstName   = session?.user?.name?.split(" ")[0] || "";
+
+  // ── Logged-in STUDENT with a university set in profile ─────────────────────
+  if (userType === "STUDENT" && uniRaw) {
+    const uniLabel = getUniversityLabel(uniRaw);
+    return {
+      initialStep: "student-service",
+      message: {
+        sender: "bot",
+        text:
+          `👋 Hi ${firstName}! I can automatically find accommodation and food services` +
+          ` near ${uniLabel} — your registered university.\n\nWhat are you looking for?`,
+        buttons: [
+          { label: "🏠  Accommodation",              action: "student-service:accommodation", color: "blue"   },
+          { label: "🍱  Food Services",              action: "student-service:food",          color: "purple" },
+          { label: "🔍  Both",                       action: "student-service:both",          color: "gray"   },
+        ],
+      },
+    };
+  }
+
+  // ── Logged-in STUDENT but no university set ─────────────────────────────────
+  if (userType === "STUDENT" && !uniRaw) {
+    return {
+      initialStep: "init",
+      message: {
+        sender: "bot",
+        text:
+          `👋 Hi ${firstName}! Your profile does not have a university set.\n\n` +
+          `Update your profile for automatic nearby suggestions, or search manually as a traveller.`,
+        buttons: [
+          { label: "👤  Update Profile",  action: "nav:/profile",      color: "blue" },
+          { label: "✈️  Search Manually", action: "role:traveller",    color: "gray" },
+        ],
+      },
+    };
+  }
+
+  // ── Not logged in, or property owner (owner functionality removed) ──────────
+  return {
+    initialStep: "init",
+    message: {
+      sender: "bot",
+      text:
+        "👋 Hi! I am EduBot, your accommodation assistant.\n\n" +
+        "I help you find PGs, hostels, flats, and food services near universities and cities.\n\n" +
+        "Who are you?",
+      buttons: [
+        { label: "🎓  I am a Student",   action: "role:student",   color: "blue"  },
+        { label: "✈️  I am a Traveller", action: "role:traveller", color: "green" },
+      ],
+    },
+  };
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Chatbot() {
   const router = useRouter();
+  const { data: session, status } = useSession();
 
-  const [isOpen,    setIsOpen]    = useState(false);
-  const [messages,  setMessages]  = useState<ChatMessage[]>([greeting()]);
-  const [input,     setInput]     = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [step,      setStep]      = useState<Step>("role");
-  const [intent,    setIntent]    = useState<Intent>("both");
+  const [isOpen,      setIsOpen]      = useState(false);
+  const [messages,    setMessages]    = useState<ChatMessage[]>([]);
+  const [initialized, setInitialized] = useState(false);
+  const [input,       setInput]       = useState("");
+  const [isLoading,   setIsLoading]   = useState(false);
+  const [step,        setStep]        = useState<Step>("init");
+  const [intent,      setIntent]      = useState<Intent>("both");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to latest message
+  // ── Build greeting once session is resolved ─────────────────────────────────
+  useEffect(() => {
+    if (status === "loading") return;
+    if (!initialized) {
+      const { message, initialStep } = buildGreeting(session);
+      setMessages([message]);
+      setStep(initialStep);
+      setInitialized(true);
+    }
+  }, [status, session, initialized]);
+
+  // ── Auto-scroll ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (isOpen) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isOpen]);
 
-  // ── Helper: append messages without mutating previous ones ─────────────────
-
   const pushMessages = (msgs: ChatMessage[]) =>
     setMessages((prev) => [...prev, ...msgs]);
 
-  // ── Central action dispatcher (called by button clicks) ────────────────────
-
-  const handleAction = (action: string) => {
-    if (action.startsWith("nav:")) {
-      setIsOpen(false);
-      router.push(action.slice(4));
-      return;
-    }
-
-    switch (action) {
-      // ── Role selection ──────────────────────────────────────────────────────
-      case "role:student":
-        pushMessages([
-          { sender: "user", text: "🎓  I am a Student" },
-          {
-            sender: "bot",
-            text: "Great! What are you looking for?",
-            buttons: [
-              { label: "🏠  Accommodation\n(PG / Hostel / Flat)", action: "service:accommodation", color: "blue"   },
-              { label: "🍱  Food Services\n(Mess / Tiffin / Cafe)", action: "service:food",          color: "purple" },
-              { label: "🔍  Both",                                  action: "service:both",          color: "gray"   },
-            ],
-          },
-        ]);
-        setStep("service");
-        break;
-
-      case "role:owner":
-        pushMessages([
-          { sender: "user", text: "🏠  I am a Property Owner" },
-          {
-            sender: "bot",
-            text: "Welcome, Property Owner! 👋\n\nList your PG, hostel, flat, or food service on EduStay and connect with thousands of students.",
-            buttons: [
-              { label: "📋  List My Property",  action: "nav:/owner/add-listing", color: "green" },
-              { label: "📊  Owner Dashboard",   action: "nav:/owner/dashboard",   color: "blue"  },
-              { label: "🔑  Login",             action: "nav:/auth/login",        color: "gray"  },
-            ],
-          },
-        ]);
-        setStep("owner");
-        break;
-
-      // ── Service type selection ──────────────────────────────────────────────
-      case "service:accommodation":
-        setIntent("accommodation");
-        pushMessages([
-          { sender: "user", text: "🏠  Accommodation (PG / Hostel / Flat)" },
-          {
-            sender: "bot",
-            text: "🏠 Looking for accommodation!\n\nType the city, area, or university you are near and I will find matching listings for you.\n\n📌 You can search by:\n  • University — IIT Bombay, AIIMS Delhi, NIT Trichy\n  • City       — Mumbai, Delhi, Chandigarh, Chennai\n  • Area       — Powai, Karol Bagh, Anna Nagar",
-          },
-        ]);
-        setStep("location");
-        break;
-
-      case "service:food":
-        setIntent("food");
-        pushMessages([
-          { sender: "user", text: "🍱  Food Services" },
-          {
-            sender: "bot",
-            text: "🍱 Looking for food services!\n\nType the city, area, or university you are near and I will search for mess, tiffin, cafe, and canteen options.\n\n📌 Try: Mumbai, Delhi, Chandigarh, IIT Bombay, Manipal",
-          },
-        ]);
-        setStep("location");
-        break;
-
-      case "service:both":
-        setIntent("both");
-        pushMessages([
-          { sender: "user", text: "🔍  Both — Accommodation & Food" },
-          {
-            sender: "bot",
-            text: "🔍 Searching for both accommodation and food!\n\nType the city, area, or university you are near.\n\n📌 Try: Mumbai, Delhi, Chandigarh, IIT Bombay, NIT Trichy",
-          },
-        ]);
-        setStep("location");
-        break;
-
-      // ── Post-results actions ────────────────────────────────────────────────
-      case "search_again":
-        pushMessages([
-          { sender: "user", text: "🔍  Search another location" },
-          { sender: "bot",  text: "Sure! Enter the city, area or university name to search again." },
-        ]);
-        setStep("location");
-        break;
-
-      case "start_over":
-        setMessages([greeting()]);
-        setStep("role");
-        setIntent("both");
-        break;
-
-      default:
-        break;
-    }
-  };
-
-  // ── Location search → calls /api/chatbot ────────────────────────────────────
+  // ── DB search (calls /api/chatbot) ──────────────────────────────────────────
 
   const searchLocation = async (location: string, currentIntent: Intent) => {
     setIsLoading(true);
@@ -181,69 +171,219 @@ export default function Chatbot() {
       const found = (data.count ?? 0) > 0;
 
       const afterButtons: BotButton[] = [
-        { label: "🔍  Search Another Location",  action: "search_again",              color: "blue"  },
+        { label: "🔍  Search Another Location", action: "search_again", color: "blue" },
         ...(found && (currentIntent === "accommodation" || currentIntent === "both")
           ? [{ label: "📋  All Accommodation", action: "nav:/student/accommodation", color: "gray" as const }]
           : []),
         ...(found && (currentIntent === "food" || currentIntent === "both")
-          ? [{ label: "🍱  All Food Services",  action: "nav:/student/food",          color: "gray" as const }]
+          ? [{ label: "🍱  All Food Services", action: "nav:/student/food", color: "gray" as const }]
           : []),
         { label: "🔄  Start Over", action: "start_over", color: "gray" },
       ];
 
-      pushMessages([
-        {
-          sender: "bot",
-          text: data.reply ?? "⚠️ Unexpected error. Please try again.",
-          buttons: afterButtons,
-        },
-      ]);
-      setStep("results");
+      pushMessages([{
+        sender: "bot",
+        text:    data.reply ?? "⚠️ Unexpected error. Please try again.",
+        buttons: afterButtons,
+      }]);
     } catch {
-      pushMessages([
-        {
-          sender: "bot",
-          text: "⚠️ Network error. Please check your connection and try again.",
-          buttons: [
-            { label: "🔍  Try Again",  action: "search_again", color: "blue" },
-            { label: "🔄  Start Over", action: "start_over",   color: "gray" },
-          ],
-        },
-      ]);
+      pushMessages([{
+        sender: "bot",
+        text: "⚠️ Network error. Please check your connection and try again.",
+        buttons: [
+          { label: "🔍  Try Again",  action: "search_again", color: "blue" },
+          { label: "🔄  Start Over", action: "start_over",   color: "gray" },
+        ],
+      }]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // ── Text input send ─────────────────────────────────────────────────────────
+  // ── Central action dispatcher ───────────────────────────────────────────────
+
+  const handleAction = async (action: string) => {
+    if (action.startsWith("nav:")) {
+      setIsOpen(false);
+      router.push(action.slice(4));
+      return;
+    }
+
+    switch (action) {
+
+      // ── role:student — not logged in, show login prompt ─────────────────────
+      case "role:student":
+        pushMessages([
+          { sender: "user", text: "🎓  I am a Student" },
+          {
+            sender: "bot",
+            text:
+              "Students get automatic location suggestions based on their registered university.\n\n" +
+              "Please log in with your student account to use this feature.",
+            buttons: [
+              { label: "🔑  Login",        action: "nav:/auth/login",     color: "blue"  },
+              { label: "📝  Register",      action: "nav:/auth/register",  color: "green" },
+              { label: "🔄  Start Over",    action: "start_over",          color: "gray"  },
+            ],
+          },
+        ]);
+        // step stays "init"
+        break;
+
+      // ── role:traveller — manual location search ─────────────────────────────
+      case "role:traveller":
+        pushMessages([
+          { sender: "user", text: "✈️  I am a Traveller" },
+          {
+            sender: "bot",
+            text: "Welcome, Traveller! 🌍\n\nWhat are you looking for?",
+            buttons: [
+              { label: "🏠  Accommodation\n(PG / Hostel / Flat)", action: "service:accommodation", color: "blue"   },
+              { label: "🍱  Food Services\n(Mess / Tiffin / Cafe)", action: "service:food",        color: "purple" },
+              { label: "🔍  Both",                                   action: "service:both",       color: "gray"   },
+            ],
+          },
+        ]);
+        setStep("service");
+        break;
+
+      // ── student-service:* — auto-search using registered university ──────────
+      case "student-service:accommodation":
+      case "student-service:food":
+      case "student-service:both": {
+        const uniRaw   = (session?.user as any)?.university ?? "";
+        const uniLabel = getUniversityLabel(uniRaw);
+
+        if (!uniLabel) {
+          pushMessages([{
+            sender: "bot",
+            text: "❌ Could not read your university. Please update your profile.",
+            buttons: [
+              { label: "👤  Update Profile", action: "nav:/profile", color: "blue" },
+              { label: "🔄  Start Over",     action: "start_over",   color: "gray" },
+            ],
+          }]);
+          setStep("init");
+          break;
+        }
+
+        const newIntent: Intent =
+          action === "student-service:accommodation" ? "accommodation" :
+          action === "student-service:food"          ? "food"          : "both";
+
+        const label =
+          newIntent === "accommodation" ? "🏠  Accommodation" :
+          newIntent === "food"          ? "🍱  Food Services" : "🔍  Both";
+
+        setIntent(newIntent);
+        setStep("location");
+        pushMessages([
+          { sender: "user", text: label },
+          { sender: "bot",  text: `🔍 Searching near ${uniLabel} (your registered university)...` },
+        ]);
+        await searchLocation(uniLabel, newIntent);
+        break;
+      }
+
+      // ── Traveller service type selection ────────────────────────────────────
+      case "service:accommodation":
+        setIntent("accommodation");
+        pushMessages([
+          { sender: "user", text: "🏠  Accommodation" },
+          {
+            sender: "bot",
+            text:
+              "🏠 Looking for accommodation!\n\n" +
+              "Type the city, area, or university you are near and I will find matching listings.\n\n" +
+              "📌 e.g., IIT Bombay, Mumbai, Delhi, Chandigarh",
+          },
+        ]);
+        setStep("location");
+        break;
+
+      case "service:food":
+        setIntent("food");
+        pushMessages([
+          { sender: "user", text: "🍱  Food Services" },
+          {
+            sender: "bot",
+            text:
+              "🍱 Looking for food services!\n\n" +
+              "Type the city, area, or university you are near.\n\n" +
+              "📌 e.g., Mumbai, Delhi, IIT Bombay, Manipal",
+          },
+        ]);
+        setStep("location");
+        break;
+
+      case "service:both":
+        setIntent("both");
+        pushMessages([
+          { sender: "user", text: "🔍  Both — Accommodation & Food" },
+          {
+            sender: "bot",
+            text:
+              "🔍 Searching for both accommodation and food!\n\n" +
+              "Type the city, area, or university you are near.",
+          },
+        ]);
+        setStep("location");
+        break;
+
+      // ── Post-results actions ────────────────────────────────────────────────
+      case "search_again":
+        pushMessages([
+          { sender: "user", text: "🔍  Search another location" },
+          { sender: "bot",  text: "Sure! Enter the city, area or university name to search." },
+        ]);
+        setStep("location");
+        break;
+
+      case "start_over": {
+        const { message, initialStep } = buildGreeting(session);
+        setMessages([message]);
+        setStep(initialStep);
+        setIntent("both");
+        break;
+      }
+
+      default:
+        break;
+    }
+  };
+
+  // ── Text input handler ──────────────────────────────────────────────────────
 
   const handleSend = async () => {
     const text = input.trim();
     if (!text || isLoading) return;
     setInput("");
 
-    // Typing "hi / hello / start / restart" always resets the flow
+    // hi / hello / restart → always reset
     if (/^(hi|hello|hey|start|restart|reset)$/i.test(text)) {
-      setMessages([greeting()]);
-      setStep("role");
+      const { message, initialStep } = buildGreeting(session);
+      setMessages([message]);
+      setStep(initialStep);
       setIntent("both");
       return;
     }
 
-    // If waiting for location input, perform DB search
-    if (step === "location" || step === "results") {
+    // ── Location search (traveller manual input or student follow-up) ─────────
+    if (step === "location") {
       pushMessages([{ sender: "user", text }]);
       await searchLocation(text, intent);
       return;
     }
 
-    // Natural language shortcuts — detect role from free text
-    if (step === "role") {
+    // ── Natural language at greeting (init) ───────────────────────────────────
+    if (step === "init") {
       pushMessages([{ sender: "user", text }]);
-      if (/student|study|accommodation|pg|hostel|food|mess|tiffin/i.test(text)) {
-        handleAction("role:student");
-      } else if (/owner|property|list|landlord|rent out/i.test(text)) {
-        handleAction("role:owner");
+      if (/student|study|university|college/i.test(text)) {
+        await handleAction("role:student");
+      } else if (/travel|tourist|visit|passing|traveller/i.test(text)) {
+        await handleAction("role:traveller");
+      } else if (/accommodation|pg|hostel|flat|food|mess|tiffin/i.test(text)) {
+        await handleAction("role:traveller");
       } else {
         pushMessages([{
           sender: "bot",
@@ -253,15 +393,15 @@ export default function Chatbot() {
       return;
     }
 
-    // Natural language shortcuts — detect service type from free text
+    // ── Natural language at traveller service selection ───────────────────────
     if (step === "service") {
       pushMessages([{ sender: "user", text }]);
       if (/food|mess|canteen|tiffin|eat|restaurant|cafe/i.test(text)) {
-        handleAction("service:food");
+        await handleAction("service:food");
       } else if (/accommodation|pg|hostel|flat|room|stay|rent/i.test(text)) {
-        handleAction("service:accommodation");
+        await handleAction("service:accommodation");
       } else if (/both/i.test(text)) {
-        handleAction("service:both");
+        await handleAction("service:both");
       } else {
         pushMessages([{
           sender: "bot",
@@ -271,19 +411,16 @@ export default function Chatbot() {
       return;
     }
 
-    // Owner step — free text
-    if (step === "owner") {
-      pushMessages([
-        { sender: "user", text },
-        {
-          sender: "bot",
-          text: "Use the buttons above to navigate to the listing or dashboard pages.",
-          buttons: [
-            { label: "📋  List My Property", action: "nav:/owner/add-listing", color: "green" },
-            { label: "🔄  Start Over",       action: "start_over",             color: "gray"  },
-          ],
-        },
-      ]);
+    // ── Natural language at student service selection ─────────────────────────
+    if (step === "student-service") {
+      pushMessages([{ sender: "user", text }]);
+      if (/food|mess|canteen|tiffin|eat|restaurant|cafe/i.test(text)) {
+        await handleAction("student-service:food");
+      } else if (/accommodation|pg|hostel|flat|room|stay|rent/i.test(text)) {
+        await handleAction("student-service:accommodation");
+      } else {
+        await handleAction("student-service:both");
+      }
       return;
     }
   };
@@ -295,9 +432,10 @@ export default function Chatbot() {
     }
   };
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  // Input is shown when the traveller (or student follow-up) needs to type a location
+  const showInput = step === "location";
 
-  const showInput = step === "location" || step === "results";
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="relative">
@@ -323,7 +461,7 @@ export default function Chatbot() {
               <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-base">🤖</div>
               <div>
                 <div className="font-semibold text-sm leading-tight">EduBot</div>
-                <div className="text-xs opacity-75 leading-tight">Student Accommodation Assistant</div>
+                <div className="text-xs opacity-75 leading-tight">Accommodation Assistant</div>
               </div>
             </div>
             <button

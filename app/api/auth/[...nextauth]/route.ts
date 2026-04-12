@@ -42,7 +42,8 @@ const handler = NextAuth({
             email: user.email,
             name: user.name,
             userType: user.userType,
-            phone: user.phone
+            phone: user.phone,
+            university: user.university
           };
         } catch (error) {
           console.error("Auth error:", error);
@@ -62,6 +63,7 @@ const handler = NextAuth({
       if (user) {
         token.userType = (user as any).userType;
         token.phone = (user as any).phone;
+        token.university = (user as any).university;
       }
       return token;
     },
@@ -70,6 +72,7 @@ const handler = NextAuth({
         (session.user as any).id = token.sub;
         (session.user as any).userType = token.userType;
         (session.user as any).phone = token.phone;
+        (session.user as any).university = token.university;
       }
       return session;
     }
